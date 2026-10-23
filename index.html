@@ -749,9 +749,18 @@ body {
   /* =====================================================
      1) CONFIG — edit this part only
      ===================================================== */
-  const TOTAL_PHOTOS = 363;                       // <-- your real image count
+  const TOTAL_PHOTOS = 1478;                       // <-- your real image count
   const FOLDER = "./";   // where the ORIGINAL images are. Same repo: "./" or "./images/"  |  external (e.g. Cloudflare R2): "https://pub-xxxx.r2.dev/"
-  const FILENAME = n => `img  (${n}).jpg`;   // NOTE: two spaces after "img" -> img  (1).jpg ... img  (1478).jpg
+  // Your files use BOTH styles:  "img (233).jpg" (1 space)  and  "img  (217).jpg" (2 spaces).
+  // The page tries the styles below in order for every photo, and remembers which one worked
+  // so the next photos start with the right style (no wasted requests).
+  const VARIANTS = [
+    n => `img  (${n}).jpg`,   // 2 spaces
+    n => `img (${n}).jpg`,    // 1 space
+    n => `img  (${n}).JPG`,
+    n => `img (${n}).JPG`
+  ];
+  const FILENAME = n => VARIANTS[0](n);
 
   // Preview (thumbnail) source:
   //  "auto"   -> on GitHub Pages uses a free resize CDN (wsrv.nl), locally uses originals
@@ -819,16 +828,16 @@ body {
   });
 
   const BATCH = 40;
+  let pref = 0;   // file-name style that worked last
   let rendered = 0;
   
-  // wrong .JPG/.jpg casing on the server? flip it once
-  function swapCase(p) {
-    const e = p.filename.match(/\.(\w+)$/)[1];
-    const ne = e === e.toUpperCase() ? e.toLowerCase() : e.toUpperCase();
-    p.filename = p.filename.slice(0, -e.length) + ne;
+  // switch a photo to another file-name style
+  function useVariant(p, v) {
+    p.v = v;
+    p.filename = VARIANTS[v](p.id);
     p.src = FOLDER + encodeURI(p.filename);
-    p.swapped = true;
   }
+  const nextVariant = p => ((p.v || 0) + 1 < VARIANTS.length ? (p.v || 0) + 1 : -1);
   // Download the untouched original (also works when images live on another site)
   async function saveOriginal(e, p) {
     if (new URL(p.src, location.href).origin === location.origin) return; // same site: normal download
@@ -844,6 +853,7 @@ body {
   }
 
   function createCard(p, index) {
+    if (p.v === undefined && pref) useVariant(p, pref);
     const card = document.createElement("figure");
     card.className = "card";
     card.tabIndex = 0;
@@ -858,13 +868,16 @@ body {
     img.decoding = "async";
     img.alt = `Gallery photo ${p.id}`;
     img.src = thumbUrl(p);
-    img.addEventListener("load", () => card.classList.add("loaded"));
+    img.addEventListener("load", () => { card.classList.add("loaded"); pref = p.v || 0; });
     let stage = 0;
     img.addEventListener("error", () => {
       stage++;
-      if (stage === 1 && thumbUrl(p) !== p.src) img.src = p.src;        // preview failed -> try the original
-      else if (!p.swapped) { swapCase(p); dl.href = p.src; dl.download = p.filename; img.src = thumbUrl(p); stage = 0; } // maybe wrong casing -> retry once
-      else card.style.display = "none";                                  // nothing worked -> hide
+      if (stage === 1 && thumbUrl(p) !== p.src) { img.src = p.src; return; }   // preview failed -> try the original
+      const nv = nextVariant(p);
+      if (nv >= 0) {                                                           // wrong name style -> try the next one
+        useVariant(p, nv); dl.href = p.src; dl.download = p.filename;
+        img.src = thumbUrl(p); stage = 0;
+      } else card.style.display = "none";                                      // nothing worked -> hide
     });
 
     const dl = document.createElement("a");
@@ -902,13 +915,22 @@ body {
 
   function openLightbox(i) { cur = i; updateLightbox(); lightbox.classList.add("open"); lightbox.setAttribute("aria-hidden", "false"); document.body.style.overflow = "hidden"; }
   function closeLightbox() { lightbox.classList.remove("open"); lightbox.setAttribute("aria-hidden", "true"); document.body.style.overflow = ""; }
+  function loadFull(p) {                      // load the ORIGINAL, trying the other name styles if needed
+    const full = new Image();
+    full.onload = () => { pref = p.v || 0; if (view[cur] === p) { lbImg.src = p.src; lbImg.classList.remove("loading"); } };
+    full.onerror = () => {
+      const nv = nextVariant(p); if (nv < 0) return;
+      useVariant(p, nv);
+      if (view[cur] === p) { lbImg.src = thumbUrl(p); lbDownload.href = p.src; lbDownload.download = p.filename; }
+      loadFull(p);
+    };
+    full.src = p.src;
+  }
   function updateLightbox() {
     const p = view[cur]; if (!p) return;
     lbImg.classList.add("loading");
     lbImg.src = thumbUrl(p);                  // instant (already cached) preview...
-    const full = new Image();
-    full.onload = () => { if (view[cur] === p) { lbImg.src = p.src; lbImg.classList.remove("loading"); } }; // ...swapped for original
-    full.src = p.src;
+    loadFull(p);
     lbCounter.textContent = `${String(cur + 1).padStart(3, "0")} / ${String(view.length).padStart(3, "0")}`;
     lbDownload.href = p.src;
     lbDownload.download = p.filename;
